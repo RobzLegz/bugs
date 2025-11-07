@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import React, { useEffect, useMemo, useState } from "react";
 import { twMerge } from "tw-merge";
 
@@ -24,8 +25,8 @@ const upgradeCostPerLevel = {
   "bit-storage": 1000,
   "bit-mine": 900,
   "grid-hall": 2000,
-  "lab": 2000,
-  "portal": 2000,
+  lab: 2000,
+  portal: 2000,
 };
 
 type BuildingAvailability = Record<
@@ -60,7 +61,7 @@ const availableBuildingPerGridHall: BuildingAvailability[] = [
       level: 3,
       count: 3,
     },
-    "lab": {
+    lab: {
       level: 1,
       count: 1,
     },
@@ -68,7 +69,7 @@ const availableBuildingPerGridHall: BuildingAvailability[] = [
       level: 3,
       count: 1,
     },
-    "portal": {
+    portal: {
       level: 1,
       count: 1,
     },
@@ -81,6 +82,7 @@ const bitStorageCapacityPerLevel = 2000;
 const Page = () => {
   const [grid, setGrid] = useState<number[]>([]);
   const [bits, setBits] = useState<number>(2000);
+  const [currentSector, setCurrentSector] = useState<number>(1);
   const [hoverElement, setHoverElement] = useState<{
     name: string;
     level: number;
@@ -95,11 +97,21 @@ const Page = () => {
     level: number;
     index: number;
   } | null>(null);
-  const [mineUncollected, setMineUncollected] = useState<Record<number, number>>({});
+  const [mineUncollected, setMineUncollected] = useState<
+    Record<number, number>
+  >({});
 
   type ShopItem = string;
 
   useEffect(() => {
+    const sector = localStorage.getItem("sector");
+    if (sector) {
+      setCurrentSector(parseInt(sector));
+    } else {
+      setCurrentSector(1);
+      localStorage.setItem("sector", "1");
+    }
+
     const saved = localStorage.getItem("grid");
     const bits = localStorage.getItem("bits");
     const mines = localStorage.getItem("mineUncollected");
@@ -200,7 +212,11 @@ const Page = () => {
 
   const maxLevelByBuilding = useMemo(() => {
     const maxLevels: Record<string, number> = {};
-    for (let levelIndex = 0; levelIndex < highestGridHallLevel; levelIndex += 1) {
+    for (
+      let levelIndex = 0;
+      levelIndex < highestGridHallLevel;
+      levelIndex += 1
+    ) {
       const availability = availableBuildingPerGridHall[levelIndex];
       if (!availability) break;
       Object.entries(availability).forEach(([name, info]) => {
@@ -256,7 +272,7 @@ const Page = () => {
         next[m.index] = (next[m.index] ?? 0) + delta;
         remainingCapacity -= delta;
       }
-      if (remainingCapacity !== (totalStorageCapacity - currentTotal)) {
+      if (remainingCapacity !== totalStorageCapacity - currentTotal) {
         setMineUncollected(next);
       }
     }, 1000);
@@ -345,7 +361,9 @@ const Page = () => {
       <div className="w-full max-w-80 h-full p-4 flex items-center justify-center">
         {activeElement?.name ? (
           <div className="w-full p-4 border-white/10 border flex flex-col items-center justify-center gap-4">
-            <strong className="text-white/70 uppercase">{activeElement.name}</strong>
+            <strong className="text-white/70 uppercase">
+              {activeElement.name}
+            </strong>
             <img
               src={`/resources/${activeElement.name}/${activeElement.level}${
                 activeElement.name.includes("storage") ? `/4` : ""
@@ -356,9 +374,13 @@ const Page = () => {
             </div>
             {(() => {
               const nextLevel = activeElement.level + 1;
-              const nextValue = getCellValueByName(activeElement.name, nextLevel);
+              const nextValue = getCellValueByName(
+                activeElement.name,
+                nextLevel
+              );
               const cost = getUpgradeCost(activeElement.name, nextLevel);
-              const maxLevel = maxLevelByBuilding[activeElement.name] ?? activeElement.level;
+              const maxLevel =
+                maxLevelByBuilding[activeElement.name] ?? activeElement.level;
               if (activeElement.level >= maxLevel) {
                 return (
                   <div className="text-white/50 text-xs uppercase tracking-wide">
@@ -366,7 +388,8 @@ const Page = () => {
                   </div>
                 );
               }
-              const canUpgrade = nextValue !== -1 && cost !== null && nextLevel <= maxLevel;
+              const canUpgrade =
+                nextValue !== -1 && cost !== null && nextLevel <= maxLevel;
               const affordable = !!cost && bits >= cost;
               if (!canUpgrade) {
                 return (
@@ -381,7 +404,9 @@ const Page = () => {
                   style={{
                     borderColor: ACCENT_COLOR,
                     color: "#ffffff",
-                    backgroundColor: affordable ? "rgba(12, 152, 233, 0.15)" : "transparent",
+                    backgroundColor: affordable
+                      ? "rgba(12, 152, 233, 0.15)"
+                      : "transparent",
                     cursor: affordable ? "pointer" : "not-allowed",
                     opacity: affordable ? 1 : 0.5,
                   }}
@@ -423,14 +448,21 @@ const Page = () => {
                   onClick={() => {
                     const amount = mineUncollected[activeElement.index] ?? 0;
                     if (amount <= 0) return;
-                    const capacityLeft = Math.max(0, totalStorageCapacity - bits);
+                    const capacityLeft = Math.max(
+                      0,
+                      totalStorageCapacity - bits
+                    );
                     const toCollect = Math.min(amount, capacityLeft);
                     if (toCollect <= 0) return;
                     setBits((b) => b + toCollect);
                     setMineUncollected((prev) => {
                       const next = { ...prev };
-                      next[activeElement.index] = Math.max(0, (next[activeElement.index] ?? 0) - toCollect);
-                      if (next[activeElement.index] <= 0) delete next[activeElement.index];
+                      next[activeElement.index] = Math.max(
+                        0,
+                        (next[activeElement.index] ?? 0) - toCollect
+                      );
+                      if (next[activeElement.index] <= 0)
+                        delete next[activeElement.index];
                       return next;
                     });
                   }}
@@ -438,6 +470,18 @@ const Page = () => {
                   Collect
                 </button>
               </>
+            ) : activeElement.name === "portal" ? (
+              <Link href={`/game/sector/${currentSector}`}>
+                <button
+                  className="px-3 py-1 rounded border text-white transition-colors"
+                  style={{
+                    borderColor: ACCENT_COLOR,
+                    backgroundColor: "rgba(12, 152, 233, 0.1)",
+                  }}
+                >
+                  Travel
+                </button>
+              </Link>
             ) : null}
           </div>
         ) : null}
