@@ -10,32 +10,41 @@ const cellValueMap: CellDef[] = [
   { name: "grid-hall", level: 1 },
   { name: "bit-storage", level: 1 },
   { name: "bit-mine", level: 1 },
+  { name: "grid-hall", level: 2 },
+  { name: "bit-storage", level: 2 },
+  { name: "bit-mine", level: 2 },
+  { name: "lab", level: 1 },
 ];
 
 const upgradeCostPerLevel = {
   "bit-storage": 1000,
   "bit-mine": 900,
+  "grid-hall": 2000,
 };
 
 const availableBuildingPerGridHall = [
   {
     "bit-storage": {
-      level: 2,
+      level: 1,
       count: 2,
     },
     "bit-mine": {
-      level: 2,
+      level: 1,
       count: 2,
     },
   },
   {
     "bit-storage": {
-      level: 4,
+      level: 2,
       count: 2,
     },
     "bit-mine": {
-      level: 4,
+      level: 3,
       count: 2,
+    },
+    "lab": {
+      level: 1,
+      count: 1,
     },
   },
 ];
@@ -58,7 +67,9 @@ const Page = () => {
   const [activeElement, setActiveElement] = useState<{
     name: string;
     level: number;
+    index: number;
   } | null>(null);
+  const [mineUncollected, setMineUncollected] = useState<Record<number, number>>({});
 
   const SHOP_ITEMS = ["bit-storage", "bit-mine"] as const;
   type ShopItem = (typeof SHOP_ITEMS)[number];
@@ -66,6 +77,7 @@ const Page = () => {
   useEffect(() => {
     const saved = localStorage.getItem("grid");
     const bits = localStorage.getItem("bits");
+    const mines = localStorage.getItem("mineUncollected");
     if (saved) {
       setGrid(JSON.parse(saved));
     } else {
@@ -83,6 +95,13 @@ const Page = () => {
       setBits(2000);
       localStorage.setItem("bits", "2000");
     }
+
+    if (mines) {
+      try {
+        const parsed = JSON.parse(mines);
+        if (parsed && typeof parsed === "object") setMineUncollected(parsed);
+      } catch {}
+    }
   }, []);
 
   // Persist state changes
@@ -95,6 +114,10 @@ const Page = () => {
   useEffect(() => {
     localStorage.setItem("bits", String(bits));
   }, [bits]);
+
+  useEffect(() => {
+    localStorage.setItem("mineUncollected", JSON.stringify(mineUncollected));
+  }, [mineUncollected]);
 
   // Helpers
   const getCellValueByName = (name: string, level: number = 1): number => {
@@ -109,6 +132,58 @@ const Page = () => {
       0
     );
   }, [grid]);
+
+  // Total storage capacity
+  const totalStorageCapacity = useMemo(() => {
+    let capacity = 0;
+    grid.forEach((v) => {
+      const def = cellValueMap[v];
+      if (def?.name.includes("storage")) {
+        const level = def.level ?? 1;
+        capacity += level * bitStorageCapacityPerLevel;
+      }
+    });
+    return capacity;
+  }, [grid]);
+
+  const totalUncollected = useMemo(() => {
+    return Object.values(mineUncollected).reduce((a, b) => a + b, 0);
+  }, [mineUncollected]);
+
+  // Production loop: 10 bits/sec per mine level, stop at capacity
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (totalStorageCapacity <= 0) return;
+      const currentTotal = bits + totalUncollected;
+      if (currentTotal >= totalStorageCapacity) return;
+
+      // Collect all mine positions and their levels
+      const mines: Array<{ index: number; level: number }> = [];
+      grid.forEach((v, idx) => {
+        const def = cellValueMap[v];
+        if (def?.name === "bit-mine") {
+          mines.push({ index: idx, level: def.level ?? 1 });
+        }
+      });
+      if (mines.length === 0) return;
+
+      let remainingCapacity = totalStorageCapacity - currentTotal;
+      if (remainingCapacity <= 0) return;
+
+      const next: Record<number, number> = { ...mineUncollected };
+      for (const m of mines) {
+        if (remainingCapacity <= 0) break;
+        const produce = 10 * m.level; // per second
+        const delta = Math.min(produce, remainingCapacity);
+        next[m.index] = (next[m.index] ?? 0) + delta;
+        remainingCapacity -= delta;
+      }
+      if (remainingCapacity !== (totalStorageCapacity - currentTotal)) {
+        setMineUncollected(next);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [grid, bits, totalUncollected, totalStorageCapacity, mineUncollected]);
 
   // Compute remaining purchasable count for each shop item based on number of halls
   const remainingPurchasesByItem = useMemo(() => {
@@ -219,6 +294,35 @@ const Page = () => {
                 activeElement.name.includes("storage") ? `/4` : ""
               }.svg`}
             />
+            {activeElement.name === "bit-mine" ? (
+              <>
+                <div className="text-white/80 text-sm">
+                  Rate: {10 * (activeElement.level ?? 1)} / sec
+                </div>
+                <div className="text-white/90 text-sm">
+                  Uncollected: {mineUncollected[activeElement.index] ?? 0}
+                </div>
+                <button
+                  className="px-3 py-1 rounded bg-white/10 border border-white/20 text-white hover:bg-white/20"
+                  onClick={() => {
+                    const amount = mineUncollected[activeElement.index] ?? 0;
+                    if (amount <= 0) return;
+                    const capacityLeft = Math.max(0, totalStorageCapacity - bits);
+                    const toCollect = Math.min(amount, capacityLeft);
+                    if (toCollect <= 0) return;
+                    setBits((b) => b + toCollect);
+                    setMineUncollected((prev) => {
+                      const next = { ...prev };
+                      next[activeElement.index] = Math.max(0, (next[activeElement.index] ?? 0) - toCollect);
+                      if (next[activeElement.index] <= 0) delete next[activeElement.index];
+                      return next;
+                    });
+                  }}
+                >
+                  Collect
+                </button>
+              </>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -257,7 +361,8 @@ const Page = () => {
                 onClick={() => {
                   setActiveElement({
                     name: cellDef.name,
-                    level: cellDef.level ?? 1,
+                   level: cellDef.level ?? 1,
+                   index: i,
                   });
                 }}
                 onMouseEnter={() => {
@@ -331,6 +436,9 @@ const Page = () => {
                     newGrid[i] = value;
                     setGrid(newGrid);
                     setBits((prev) => prev - price);
+                    if (item === "bit-mine") {
+                      setMineUncollected((prev) => ({ ...prev, [i]: 0 }));
+                    }
                     return;
                   }
 
@@ -338,9 +446,19 @@ const Page = () => {
                     const from = data.fromIndex;
                     if (from === i) return;
                     const newGrid = [...grid];
+                    // move uncollected if the moved entity is a mine
+                    const movingDef = cellValueMap[newGrid[from]];
                     newGrid[i] = newGrid[from];
                     newGrid[from] = 0;
                     setGrid(newGrid);
+                    if (movingDef?.name === "bit-mine") {
+                      setMineUncollected((prev) => {
+                        const next = { ...prev };
+                        next[i] = next[from] ?? 0;
+                        delete next[from];
+                        return next;
+                      });
+                    }
                     return;
                   }
                 }}
