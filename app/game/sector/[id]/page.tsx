@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import Link from "next/link";
 
 type CellDef = { name: string; level?: number };
 
@@ -135,6 +136,27 @@ const Page = () => {
   const [grid, setGrid] = useState<number[]>([]);
   const [bits, setBits] = useState<number>(0);
   const [coloredSvgs, setColoredSvgs] = useState<Map<string, string>>(new Map());
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const winRecordedRef = useRef<boolean>(false);
+
+  // Tron config and state
+  const GRID_SIZE = 8;
+  const CELL_SIZE = 62; // must match grid cell size styles
+  type Direction = "up" | "down" | "left" | "right";
+  type Vec = { x: number; y: number };
+
+  const [playerPos, setPlayerPos] = useState<Vec | null>(null);
+  const [playerDir, setPlayerDir] = useState<Direction>("right");
+  const [playerTrail, setPlayerTrail] = useState<Vec[]>([]);
+
+  const [opponentPos, setOpponentPos] = useState<Vec | null>(null);
+  const [opponentDir, setOpponentDir] = useState<Direction>("left");
+  const [opponentTrail, setOpponentTrail] = useState<Vec[]>([]);
+  const [opponentDead, setOpponentDead] = useState<boolean>(false);
+
+  const [gameOver, setGameOver] = useState<boolean>(false);
+  const [didWin, setDidWin] = useState<boolean>(false);
+  const [started, setStarted] = useState<boolean>(false);
 
   // Deterministic color per sector
   const accentColor = useMemo(() => {
@@ -147,6 +169,83 @@ const Page = () => {
     setGrid(g);
     setBits(b);
   }, [sectorId]);
+
+  // Helpers for Tron
+  const posToKey = (p: Vec) => `${Math.round(p.x * 2)}:${Math.round(p.y * 2)}`;
+  const isOutOfBounds = (p: Vec) => p.x < 0 || p.x >= GRID_SIZE || p.y < 0 || p.y >= GRID_SIZE;
+  const addDir = (p: Vec, d: Direction): Vec => {
+    switch (d) {
+      case "up":
+        return { x: p.x, y: p.y - 0.5 };
+      case "down":
+        return { x: p.x, y: p.y + 0.5 };
+      case "left":
+        return { x: p.x - 0.5, y: p.y };
+      case "right":
+        return { x: p.x + 0.5, y: p.y };
+    }
+  };
+  const leftOf = (d: Direction): Direction => (d === "up" ? "left" : d === "down" ? "right" : d === "left" ? "down" : "up");
+  const rightOf = (d: Direction): Direction => (d === "up" ? "right" : d === "down" ? "left" : d === "left" ? "up" : "down");
+
+  const hallCellIndex = useMemo(() => {
+    const idx = grid.findIndex((v) => cellValueMap[v]?.name === "grid-hall");
+    return idx >= 0 ? idx : null;
+  }, [grid]);
+  const hallCellCoord = useMemo(() => {
+    if (hallCellIndex == null) return null;
+    const x = hallCellIndex % GRID_SIZE;
+    const y = Math.floor(hallCellIndex / GRID_SIZE);
+    return { x, y };
+  }, [hallCellIndex]);
+
+  const isBlockedByBuilding = (p: Vec): boolean => {
+    if (isOutOfBounds(p)) return true;
+    const cx = Math.floor(p.x);
+    const cy = Math.floor(p.y);
+    const idx = cy * GRID_SIZE + cx;
+    const def = cellValueMap[grid[idx]];
+    if (!def?.name) return false;
+    return def.name !== "grid-hall"; // only non-hall blocks
+  };
+
+  const resetGame = () => {
+    const emptyCells: number[] = [];
+    const leftEmpty: number[] = [];
+    const rightEmpty: number[] = [];
+    grid.forEach((v, i) => {
+      const def = cellValueMap[v];
+      if (def?.name) return;
+      emptyCells.push(i);
+      const x = i % GRID_SIZE;
+      if (x < GRID_SIZE / 2) leftEmpty.push(i);
+      else rightEmpty.push(i);
+    });
+    const rndPick = (arr: number[]) => arr[Math.floor(Math.random() * arr.length)];
+    const pPool = leftEmpty.length > 0 ? leftEmpty : emptyCells;
+    const oPool = rightEmpty.length > 0 ? rightEmpty : emptyCells;
+    let pIndex = rndPick(pPool);
+    let oIndex = rndPick(oPool);
+    let guard = 0;
+    while (oIndex === pIndex && guard++ < 50) oIndex = rndPick(oPool);
+
+    const pX = (pIndex % GRID_SIZE) + 0.5;
+    const pY = Math.floor(pIndex / GRID_SIZE) + 0.5;
+    const oX = (oIndex % GRID_SIZE) + 0.5;
+    const oY = Math.floor(oIndex / GRID_SIZE) + 0.5;
+
+    setPlayerPos({ x: pX, y: pY });
+    setPlayerDir("right");
+    setPlayerTrail([{ x: pX, y: pY }]);
+    setOpponentPos({ x: oX, y: oY });
+    setOpponentDir("left");
+    setOpponentTrail([{ x: oX, y: oY }]);
+    setOpponentDead(false);
+    setGameOver(false);
+    setDidWin(false);
+    setStarted(false);
+    winRecordedRef.current = false;
+  };
 
   // Compute which storage image (0..4) to display for each storage cell index.
   const storageImageByIndex = useMemo(() => {
@@ -218,9 +317,126 @@ const Page = () => {
     };
   }, [grid, storageImageByIndex, accentColor]);
 
+  // Initialize game when grid is ready
+  useEffect(() => {
+    if (grid.length === GRID_SIZE * GRID_SIZE) {
+      resetGame();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grid.length]);
+
+  // Controls: WASD
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (gameOver) return;
+      const key = e.key.toLowerCase();
+      if (key === "w") setPlayerDir((d) => (d === "down" ? d : "up"));
+      if (key === "s") setPlayerDir((d) => (d === "up" ? d : "down"));
+      if (key === "a") setPlayerDir((d) => (d === "right" ? d : "left"));
+      if (key === "d") setPlayerDir((d) => (d === "left" ? d : "right"));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [gameOver]);
+
+  // Opponent AI: choose next direction avoiding buildings/trails
+  const chooseOpponentDir = (pos: Vec, dir: Direction, occupied: Set<string>): Direction => {
+    const candidates: Direction[] = [dir, leftOf(dir), rightOf(dir), leftOf(leftOf(dir))];
+    for (const cand of candidates) {
+      const np = addDir(pos, cand);
+      const hitTrail = occupied.has(posToKey(np));
+      const blocked = isOutOfBounds(np) || isBlockedByBuilding(np) || hitTrail;
+      if (!blocked) return cand;
+    }
+    return dir;
+  };
+
+  // Movement loop
+  useEffect(() => {
+    if (!playerPos || gameOver || !started) return;
+    const interval = setInterval(() => {
+      setPlayerPos((pp) => {
+        if (!pp || gameOver) return pp;
+        const occupied = new Set<string>();
+        playerTrail.forEach((p) => occupied.add(posToKey(p)));
+        opponentTrail.forEach((p) => occupied.add(posToKey(p)));
+        const nextP = addDir(pp, playerDir);
+        if (isOutOfBounds(nextP)) {
+          setGameOver(true);
+          setDidWin(false);
+          return pp;
+        }
+        const cellIdx = Math.floor(nextP.y) * GRID_SIZE + Math.floor(nextP.x);
+        const cellDef = cellValueMap[grid[cellIdx]];
+        if (cellDef?.name === "grid-hall") {
+          // Only allow clearing if opponent is dead
+          if (opponentDead || !opponentPos) {
+            setGameOver(true);
+            setDidWin(true);
+            if (!winRecordedRef.current) {
+              try {
+                const cur = parseInt(localStorage.getItem("sector") ?? "1");
+                localStorage.setItem("sector", String(cur + 1));
+              } catch {}
+              winRecordedRef.current = true;
+            }
+          }
+          setPlayerTrail((t) => [...t, nextP]);
+          return nextP;
+        }
+        if (cellDef?.name && cellDef.name !== "grid-hall") {
+          setGameOver(true);
+          setDidWin(false);
+          return pp;
+        }
+        if (occupied.has(posToKey(nextP)) || (opponentPos && posToKey(nextP) === posToKey(opponentPos))) {
+          setGameOver(true);
+          setDidWin(false);
+          return pp;
+        }
+        setPlayerTrail((t) => [...t, nextP]);
+        return nextP;
+      });
+
+      setOpponentPos((op) => {
+        if (!op || gameOver || opponentDead) return op;
+        const occupied = new Set<string>();
+        playerTrail.forEach((p) => occupied.add(posToKey(p)));
+        opponentTrail.forEach((p) => occupied.add(posToKey(p)));
+        const nd = chooseOpponentDir(op, opponentDir, occupied);
+        if (nd !== opponentDir) setOpponentDir(nd);
+        const nextO = addDir(op, nd);
+        if (isOutOfBounds(nextO)) {
+          setOpponentDead(true);
+          setOpponentTrail([]);
+          return null;
+        }
+        const cellIdxO = Math.floor(nextO.y) * GRID_SIZE + Math.floor(nextO.x);
+        const cellDefO = cellValueMap[grid[cellIdxO]];
+        if (cellDefO?.name && cellDefO.name !== "grid-hall") {
+          setOpponentDead(true);
+          setOpponentTrail([]);
+          return null;
+        }
+        const occ2 = new Set<string>();
+        playerTrail.forEach((p) => occ2.add(posToKey(p)));
+        opponentTrail.forEach((p) => occ2.add(posToKey(p)));
+        if (occ2.has(posToKey(nextO)) || (playerPos && posToKey(nextO) === posToKey(playerPos))) {
+          setOpponentDead(true);
+          setOpponentTrail([]);
+          return null;
+        }
+        setOpponentTrail((t) => [...t, nextO]);
+        return nextO;
+      });
+    }, 200);
+    return () => clearInterval(interval);
+  }, [playerPos, opponentPos, playerDir, opponentDir, gameOver, started, opponentDead, grid, playerTrail, opponentTrail]);
+
   return (
     <div className="w-full h-screen bg-black flex items-center justify-center">
-      <div className="w-full max-w-124 h-full max-h-124 grid grid-cols-8">
+      <div ref={gridRef} className="relative" style={{ width: 8 * 62, height: 8 * 62 }}>
+        <div className="w-full h-full grid grid-cols-8">
         {grid.map((cell, i) => {
           const cellDef = cellValueMap[cell];
           const isEmpty = !cellDef?.name;
@@ -247,12 +463,97 @@ const Page = () => {
                   src={src}
                   alt={`${cellDef.name}`}
                   className="w-full h-full max-w-20 max-h-20 object-contain"
+                  style={{ opacity: cellDef.name === "grid-hall" && !opponentDead ? 0.7 : 1 }}
                 />
               ) : null}
             </div>
           );
         })}
+        </div>
+
+        {/* Trails and bikes overlay */}
+        <div className="absolute inset-0 pointer-events-none">
+          {playerTrail.map((p, idx) => (
+            <div
+              key={`pt-${idx}`}
+              style={{ position: "absolute", left: p.x * 62 - 3, top: p.y * 62 - 3, width: 6, height: 6, backgroundColor: "#22c55e", boxShadow: "0 0 6px rgba(34,197,94,0.8)" }}
+            />
+          ))}
+          {opponentTrail.map((p, idx) => (
+            <div
+              key={`ot-${idx}`}
+              style={{ position: "absolute", left: p.x * 62 - 3, top: p.y * 62 - 3, width: 6, height: 6, backgroundColor: "#ef4444", boxShadow: "0 0 6px rgba(239,68,68,0.8)" }}
+            />
+          ))}
+          {playerPos ? (
+            <img
+              src="/resources/bike/1.svg"
+              alt="player"
+              style={{
+                position: "absolute",
+                left: playerPos.x * 62 - 12,
+                top: playerPos.y * 62 - 12,
+                width: 24,
+                height: 24,
+                transform: `rotate(${playerDir === "up" ? 0 : playerDir === "right" ? 90 : playerDir === "down" ? 180 : -90}deg)`,
+                transformOrigin: "center center",
+                filter: "drop-shadow(0 0 6px rgba(34,197,94,0.8))",
+              }}
+            />
+          ) : null}
+          {opponentPos ? (
+            <img
+              src="/resources/bike/1.svg"
+              alt="opponent"
+              style={{
+                position: "absolute",
+                left: opponentPos.x * 62 - 12,
+                top: opponentPos.y * 62 - 12,
+                width: 24,
+                height: 24,
+                transform: `rotate(${opponentDir === "up" ? 0 : opponentDir === "right" ? 90 : opponentDir === "down" ? 180 : -90}deg)`,
+                transformOrigin: "center center",
+                filter: "hue-rotate(180deg) drop-shadow(0 0 6px rgba(239,68,68,0.8))",
+                opacity: 0.9,
+              }}
+            />
+          ) : null}
+        </div>
+
+        {gameOver ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+            <div className="min-w-64 max-w-80 p-4 rounded border" style={{ borderColor: didWin ? "#22c55e" : "#ef4444" }}>
+              <div className="text-white text-lg font-semibold mb-2 text-center">{didWin ? "Sector Cleared!" : "Game Over"}</div>
+              <div className="flex gap-2 justify-center">
+                {didWin ? (
+                  <Link href="/game">
+                    <button className="px-3 py-2 rounded border text-white" style={{ borderColor: "#0C98E9", backgroundColor: "rgba(12,152,233,0.1)" }}>Home</button>
+                  </Link>
+                ) : (
+                  <>
+                    <button className="px-3 py-2 rounded border text-white" style={{ borderColor: "#0C98E9", backgroundColor: "rgba(12,152,233,0.1)" }} onClick={() => resetGame()}>Try Again</button>
+                    <Link href="/game"><button className="px-3 py-2 rounded border text-white" style={{ borderColor: "#0C98E9", backgroundColor: "rgba(12,152,233,0.1)" }}>Home</button></Link>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
       </div>
+
+      {/* Start button under grid */}
+      {!started && !gameOver ? (
+        <div className="absolute" style={{ top: `calc(50% + ${8 * 62 / 2 + 24}px)` }}>
+          <button
+            className="px-4 py-2 rounded border text-white"
+            style={{ borderColor: accentColor, backgroundColor: "rgba(12,152,233,0.1)" }}
+            onClick={() => setStarted(true)}
+          >
+            Start
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 };
