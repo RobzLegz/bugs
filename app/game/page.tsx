@@ -13,16 +13,30 @@ const cellValueMap: CellDef[] = [
   { name: "grid-hall", level: 2 },
   { name: "bit-storage", level: 2 },
   { name: "bit-mine", level: 2 },
+  { name: "bit-mine", level: 3 },
   { name: "lab", level: 1 },
+  { name: "portal", level: 1 },
 ];
+
+const ACCENT_COLOR = "#0C98E9";
 
 const upgradeCostPerLevel = {
   "bit-storage": 1000,
   "bit-mine": 900,
   "grid-hall": 2000,
+  "lab": 2000,
+  "portal": 2000,
 };
 
-const availableBuildingPerGridHall = [
+type BuildingAvailability = Record<
+  string,
+  {
+    level: number;
+    count: number;
+  }
+>;
+
+const availableBuildingPerGridHall: BuildingAvailability[] = [
   {
     "bit-storage": {
       level: 1,
@@ -31,6 +45,10 @@ const availableBuildingPerGridHall = [
     "bit-mine": {
       level: 1,
       count: 2,
+    },
+    "grid-hall": {
+      level: 2,
+      count: 1,
     },
   },
   {
@@ -40,9 +58,17 @@ const availableBuildingPerGridHall = [
     },
     "bit-mine": {
       level: 3,
-      count: 2,
+      count: 3,
     },
     "lab": {
+      level: 1,
+      count: 1,
+    },
+    "grid-hall": {
+      level: 3,
+      count: 1,
+    },
+    "portal": {
       level: 1,
       count: 1,
     },
@@ -71,8 +97,7 @@ const Page = () => {
   } | null>(null);
   const [mineUncollected, setMineUncollected] = useState<Record<number, number>>({});
 
-  const SHOP_ITEMS = ["bit-storage", "bit-mine"] as const;
-  type ShopItem = (typeof SHOP_ITEMS)[number];
+  type ShopItem = string;
 
   useEffect(() => {
     const saved = localStorage.getItem("grid");
@@ -126,12 +151,65 @@ const Page = () => {
     );
   };
 
-  const numGridHalls = useMemo(() => {
-    return grid.reduce(
-      (acc, v) => acc + (cellValueMap[v]?.name === "grid-hall" ? 1 : 0),
-      0
-    );
+  const getUpgradeCost = (name: string, nextLevel: number): number | null => {
+    const base = upgradeCostPerLevel[name as keyof typeof upgradeCostPerLevel];
+    if (!base) return null;
+    return base * nextLevel;
+  };
+
+  const highestGridHallLevel = useMemo(() => {
+    let max = 0;
+    grid.forEach((value) => {
+      const def = cellValueMap[value];
+      if (def?.name === "grid-hall") {
+        const level = def.level ?? 1;
+        if (level > max) max = level;
+      }
+    });
+    return max;
   }, [grid]);
+
+  const allowedCountsByItem = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (highestGridHallLevel <= 0) {
+      return counts;
+    }
+    const availability = availableBuildingPerGridHall[highestGridHallLevel - 1];
+    if (!availability) {
+      return counts;
+    }
+    Object.entries(availability).forEach(([name, info]) => {
+      if (!info) return;
+      const total = info.count ?? 0;
+      if (total > 0) {
+        counts[name] = total;
+      }
+    });
+    return counts;
+  }, [highestGridHallLevel]);
+
+  const placedCountsByItem = useMemo(() => {
+    const counts: Record<string, number> = {};
+    grid.forEach((value) => {
+      const name = cellValueMap[value]?.name;
+      if (!name) return;
+      counts[name] = (counts[name] ?? 0) + 1;
+    });
+    return counts;
+  }, [grid]);
+
+  const maxLevelByBuilding = useMemo(() => {
+    const maxLevels: Record<string, number> = {};
+    for (let levelIndex = 0; levelIndex < highestGridHallLevel; levelIndex += 1) {
+      const availability = availableBuildingPerGridHall[levelIndex];
+      if (!availability) break;
+      Object.entries(availability).forEach(([name, info]) => {
+        if (!info) return;
+        maxLevels[name] = Math.max(maxLevels[name] ?? 0, info.level ?? 1);
+      });
+    }
+    return maxLevels;
+  }, [highestGridHallLevel]);
 
   // Total storage capacity
   const totalStorageCapacity = useMemo(() => {
@@ -187,43 +265,22 @@ const Page = () => {
 
   // Compute remaining purchasable count for each shop item based on number of halls
   const remainingPurchasesByItem = useMemo(() => {
-    const allowedCounts: Record<ShopItem, number> = {
-      "bit-storage": 0,
-      "bit-mine": 0,
-    };
-    for (let i = 0; i < numGridHalls; i++) {
-      const perHall = availableBuildingPerGridHall[i];
-      if (!perHall) break;
-      for (const item of SHOP_ITEMS) {
-        allowedCounts[item] += perHall[item]?.count ?? 0;
-      }
-    }
-
-    const placedCounts: Record<ShopItem, number> = {
-      "bit-storage": 0,
-      "bit-mine": 0,
-    };
-    grid.forEach((v) => {
-      const name = cellValueMap[v]?.name;
-      if (name === "bit-storage") placedCounts["bit-storage"] += 1;
-      if (name === "bit-mine") placedCounts["bit-mine"] += 1;
+    const remaining: Record<string, number> = {};
+    Object.entries(allowedCountsByItem).forEach(([name, allowed]) => {
+      if (allowed <= 0) return;
+      const placed = placedCountsByItem[name] ?? 0;
+      remaining[name] = Math.max(0, allowed - placed);
     });
-
-    const remaining: Record<ShopItem, number> = {
-      "bit-storage": Math.max(
-        0,
-        allowedCounts["bit-storage"] - placedCounts["bit-storage"]
-      ),
-      "bit-mine": Math.max(
-        0,
-        allowedCounts["bit-mine"] - placedCounts["bit-mine"]
-      ),
-    };
     return remaining;
-  }, [grid, numGridHalls]);
+  }, [allowedCountsByItem, placedCountsByItem]);
+
+  const shopItems = useMemo(() => {
+    return Object.keys(allowedCountsByItem).sort();
+  }, [allowedCountsByItem]);
 
   const getPriceForItem = (item: ShopItem): number => {
-    return upgradeCostPerLevel[item];
+    const cost = upgradeCostPerLevel[item as keyof typeof upgradeCostPerLevel];
+    return cost ?? 0;
   };
 
   // DnD helpers
@@ -294,6 +351,61 @@ const Page = () => {
                 activeElement.name.includes("storage") ? `/4` : ""
               }.svg`}
             />
+            <div className="text-white text-sm">
+              Level: {activeElement.level}
+            </div>
+            {(() => {
+              const nextLevel = activeElement.level + 1;
+              const nextValue = getCellValueByName(activeElement.name, nextLevel);
+              const cost = getUpgradeCost(activeElement.name, nextLevel);
+              const maxLevel = maxLevelByBuilding[activeElement.name] ?? activeElement.level;
+              if (activeElement.level >= maxLevel) {
+                return (
+                  <div className="text-white/50 text-xs uppercase tracking-wide">
+                    Max Level Reached
+                  </div>
+                );
+              }
+              const canUpgrade = nextValue !== -1 && cost !== null && nextLevel <= maxLevel;
+              const affordable = !!cost && bits >= cost;
+              if (!canUpgrade) {
+                return (
+                  <div className="text-white/50 text-xs uppercase tracking-wide">
+                    Upgrade Unavailable
+                  </div>
+                );
+              }
+              return (
+                <button
+                  className="px-3 py-2 rounded border text-sm font-medium transition-colors"
+                  style={{
+                    borderColor: ACCENT_COLOR,
+                    color: "#ffffff",
+                    backgroundColor: affordable ? "rgba(12, 152, 233, 0.15)" : "transparent",
+                    cursor: affordable ? "pointer" : "not-allowed",
+                    opacity: affordable ? 1 : 0.5,
+                  }}
+                  disabled={!affordable}
+                  onClick={() => {
+                    if (!affordable || !activeElement) return;
+                    if (nextValue === -1 || cost === null) return;
+                    const updatedGrid = [...grid];
+                    updatedGrid[activeElement.index] = nextValue;
+                    const updatedBits = bits - cost;
+                    setBits(updatedBits);
+                    setGrid(updatedGrid);
+                    localStorage.setItem("bits", String(updatedBits));
+                    localStorage.setItem("grid", JSON.stringify(updatedGrid));
+                    setActiveElement({
+                      ...activeElement,
+                      level: nextLevel,
+                    });
+                  }}
+                >
+                  Upgrade to Lv {nextLevel} · {cost} bits
+                </button>
+              );
+            })()}
             {activeElement.name === "bit-mine" ? (
               <>
                 <div className="text-white/80 text-sm">
@@ -303,7 +415,11 @@ const Page = () => {
                   Uncollected: {mineUncollected[activeElement.index] ?? 0}
                 </div>
                 <button
-                  className="px-3 py-1 rounded bg-white/10 border border-white/20 text-white hover:bg-white/20"
+                  className="px-3 py-1 rounded border text-white transition-colors"
+                  style={{
+                    borderColor: ACCENT_COLOR,
+                    backgroundColor: "rgba(12, 152, 233, 0.1)",
+                  }}
                   onClick={() => {
                     const amount = mineUncollected[activeElement.index] ?? 0;
                     if (amount <= 0) return;
@@ -349,20 +465,31 @@ const Page = () => {
             const highlight =
               hover && hover.index === i
                 ? hover.allowed
-                  ? "border-blue-400"
+                  ? "border-[var(--accent)]"
                   : "border-red-400"
                 : "";
+
+            const highlightStyle =
+              hover && hover.index === i
+                ? {
+                    borderColor: hover.allowed ? ACCENT_COLOR : "#f87171",
+                    boxShadow: hover.allowed
+                      ? `0 0 8px rgba(12, 152, 233, 0.45)`
+                      : `0 0 8px rgba(248, 113, 113, 0.45)`,
+                  }
+                : undefined;
 
             return (
               <div
                 className={twMerge(`${cn} ${highlight}`)}
+                style={highlightStyle}
                 key={i}
                 draggable={!isEmpty}
                 onClick={() => {
                   setActiveElement({
                     name: cellDef.name,
-                   level: cellDef.level ?? 1,
-                   index: i,
+                    level: cellDef.level ?? 1,
+                    index: i,
                   });
                 }}
                 onMouseEnter={() => {
@@ -486,7 +613,7 @@ const Page = () => {
 
       <div className="w-80 p-4">
         <div className="w-full h-full border border-white/10 rounded p-3 flex flex-col gap-3 overflow-auto">
-          {SHOP_ITEMS.map((item) => {
+          {shopItems.map((item) => {
             const remaining = remainingPurchasesByItem[item] ?? 0;
             const price = getPriceForItem(item);
             const canDrag = remaining > 0 && bits >= price;
@@ -532,7 +659,13 @@ const Page = () => {
 
       {/* Quick controls for testing (optional) */}
       <div className="fixed top-4 left-1/2 -translate-x-1/2 flex gap-2">
-        <span className="text-white px-2 py-2 bg-white/10 rounded border border-white/30">
+        <span
+          className="text-white px-2 py-2 rounded border"
+          style={{
+            borderColor: ACCENT_COLOR,
+            backgroundColor: "rgba(12, 152, 233, 0.12)",
+          }}
+        >
           Bits: {bits}
         </span>
       </div>
