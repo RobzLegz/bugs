@@ -138,6 +138,7 @@ const Page = () => {
   const [coloredSvgs, setColoredSvgs] = useState<Map<string, string>>(new Map());
   const gridRef = useRef<HTMLDivElement | null>(null);
   const winRecordedRef = useRef<boolean>(false);
+  const [currentSector, setCurrentSector] = useState<number>(1);
 
   // Tron config and state
   const GRID_SIZE = 8;
@@ -173,6 +174,12 @@ const Page = () => {
   // Helpers for Tron
   const posToKey = (p: Vec) => `${Math.round(p.x * 2)}:${Math.round(p.y * 2)}`;
   const isOutOfBounds = (p: Vec) => p.x < 0 || p.x >= GRID_SIZE || p.y < 0 || p.y >= GRID_SIZE;
+  const clampToGrid = (v: number) => Math.max(0, Math.min(GRID_SIZE - 1e-6, v));
+  const posToCellIndex = (p: Vec) => {
+    const cx = Math.floor(clampToGrid(p.x));
+    const cy = Math.floor(clampToGrid(p.y));
+    return cy * GRID_SIZE + cx;
+  };
   const addDir = (p: Vec, d: Direction): Vec => {
     switch (d) {
       case "up":
@@ -208,6 +215,68 @@ const Page = () => {
     if (!def?.name) return false;
     return def.name !== "grid-hall"; // only non-hall blocks
   };
+
+  // Build blocked cells from buildings (non-hall)
+  const buildBuildingBlockedCellsSet = (): Set<number> => {
+    const blocked = new Set<number>();
+    for (let idx = 0; idx < grid.length; idx += 1) {
+      const def = cellValueMap[grid[idx]];
+      if (def?.name && def.name !== "grid-hall") blocked.add(idx);
+    }
+    return blocked;
+  };
+
+  // Mark cells that contain any trail point
+  const buildTrailBlockedCellsSet = (): Set<number> => {
+    const blocked = new Set<number>();
+    const addTrail = (trail: Vec[]) => {
+      trail.forEach((p) => {
+        const idx = posToCellIndex(p);
+        blocked.add(idx);
+      });
+    };
+    addTrail(playerTrail);
+    addTrail(opponentTrail);
+    return blocked;
+  };
+
+  // BFS count of reachable cells for the player from a start cell, given blocked cells
+  const computeReachableCellsCount = (blocked: Set<number>, startIdx: number): number => {
+    if (startIdx < 0 || startIdx >= GRID_SIZE * GRID_SIZE) return 0;
+    if (blocked.has(startIdx)) return 0;
+    const visited = new Set<number>();
+    const q: number[] = [startIdx];
+    visited.add(startIdx);
+    const dirs = [
+      { dx: 1, dy: 0 },
+      { dx: -1, dy: 0 },
+      { dx: 0, dy: 1 },
+      { dx: 0, dy: -1 },
+    ];
+    while (q.length) {
+      const cur = q.shift()!;
+      const cx = cur % GRID_SIZE;
+      const cy = Math.floor(cur / GRID_SIZE);
+      for (const d of dirs) {
+        const nx = cx + d.dx;
+        const ny = cy + d.dy;
+        if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) continue;
+        const ni = ny * GRID_SIZE + nx;
+        if (blocked.has(ni) || visited.has(ni)) continue;
+        visited.add(ni);
+        q.push(ni);
+      }
+    }
+    return visited.size;
+  };
+
+  // Read current sector from localStorage for AI gating
+  useEffect(() => {
+    try {
+      const s = parseInt(localStorage.getItem("sector") ?? "1");
+      if (!Number.isNaN(s)) setCurrentSector(s);
+    } catch {}
+  }, []);
 
   const resetGame = () => {
     const emptyCells: number[] = [];
@@ -342,13 +411,93 @@ const Page = () => {
   // Opponent AI: choose next direction avoiding buildings/trails
   const chooseOpponentDir = (pos: Vec, dir: Direction, occupied: Set<string>): Direction => {
     const candidates: Direction[] = [dir, leftOf(dir), rightOf(dir), leftOf(leftOf(dir))];
-    for (const cand of candidates) {
-      const np = addDir(pos, cand);
-      const hitTrail = occupied.has(posToKey(np));
-      const blocked = isOutOfBounds(np) || isBlockedByBuilding(np) || hitTrail;
-      if (!blocked) return cand;
+
+    // Basic avoidance (for sectors <= 10)
+    const basicPick = () => {
+      for (const cand of candidates) {
+        const np = addDir(pos, cand);
+        const hitTrail = occupied.has(posToKey(np));
+        const blocked = isOutOfBounds(np) || isBlockedByBuilding(np) || hitTrail;
+        if (!blocked) return cand;
+      }
+      return dir;
+    };
+
+    // Advanced trapping logic after sector 10
+    if (currentSector > 10 && playerPos) {
+      const buildingBlocked = buildBuildingBlockedCellsSet();
+      const trailBlocked = buildTrailBlockedCellsSet();
+
+      // Merge blocked sets for base state
+      const baseBlocked = new Set<number>([...buildingBlocked, ...trailBlocked]);
+      const playerStartIdx = posToCellIndex(playerPos);
+
+      type CandEval = {
+        cand: Direction;
+        nextPos: Vec;
+        playerReachable: number; // lower is better (trap)
+        selfReachable: number;   // higher is safer
+        degree: number;          // local free neighbors
+        dist: number;            // distance to player (tie-break)
+      };
+      const evals: CandEval[] = [];
+      for (const cand of candidates) {
+        const np = addDir(pos, cand);
+        const hitTrail = occupied.has(posToKey(np));
+        const blockedNow = isOutOfBounds(np) || isBlockedByBuilding(np) || hitTrail;
+        if (blockedNow) continue;
+
+        // Simulate opponent occupying next cell (tighten player's space)
+        const simBlocked = new Set<number>(baseBlocked);
+        simBlocked.add(posToCellIndex(np));
+
+        // Player's reachable area if we take this move
+        const playerReachable = computeReachableCellsCount(simBlocked, playerStartIdx);
+
+        // Opponent's own safety: reachable area from the new position
+        const selfReachable = computeReachableCellsCount(baseBlocked, posToCellIndex(np));
+
+        // Local degree (free neighbors) around next position
+        const neighbors: Vec[] = [
+          { x: np.x + 1, y: np.y },
+          { x: np.x - 1, y: np.y },
+          { x: np.x, y: np.y + 1 },
+          { x: np.x, y: np.y - 1 },
+        ];
+        let degree = 0;
+        for (const q of neighbors) {
+          if (isOutOfBounds(q)) continue;
+          const qi = posToCellIndex(q);
+          if (!baseBlocked.has(qi)) degree += 1;
+        }
+
+        const dx = (playerPos.x - np.x);
+        const dy = (playerPos.y - np.y);
+        const dist = dx * dx + dy * dy;
+
+        evals.push({ cand, nextPos: np, playerReachable, selfReachable, degree, dist });
+      }
+
+      if (evals.length) {
+        // After sector 25: self-preservation filter (avoid dead-ends and tiny pockets)
+        const filtered =
+          currentSector > 25
+            ? evals.filter((e) => e.degree > 1 && e.selfReachable >= 6)
+            : evals;
+
+        const list = filtered.length ? filtered : evals; // fallback if all filtered out
+        // Pick move that minimizes player's reachable space; tie: safer selfReachable; then closer to player
+        list.sort((a, b) => {
+          if (a.playerReachable !== b.playerReachable) return a.playerReachable - b.playerReachable;
+          if (a.selfReachable !== b.selfReachable) return b.selfReachable - a.selfReachable;
+          return a.dist - b.dist;
+        });
+        return list[0].cand;
+      }
+      return basicPick();
     }
-    return dir;
+
+    return basicPick();
   };
 
   // Movement loop
